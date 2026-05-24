@@ -1,0 +1,180 @@
+
+# 1. Project Structure
+Bashquorumfl/
+├── main.py
+├── federated/
+│   ├── client.py
+│   ├── server.py
+│   └── reputation.py
+├── crypto/
+│   ├── pqc.py
+│   └── merkle.py
+├── blockchain/
+│   └── fabric_client.py
+├── utils/
+│   └── qcoc.py
+├── requirements.txt
+└── config.yaml
+
+# 2. requirements.txt
+txttensorflow-federated==0.80.0
+liboqs-python
+web3  # or hyperledger fabric SDK if using Go/Java
+numpy
+pandas
+scikit-learn
+torch  # or tensorflow
+cryptography
+
+# 3. Post-Quantum Cryptography (crypto/pqc.py)
+Pythonimport oqs
+import hashlib
+from typing import Tuple
+
+class PQCCrypto:
+    def __init__(self):
+        self.kem = oqs.KeyEncapsulation("Kyber768")
+        self.sig = oqs.Signature("ML-DSA-44")  # or ML-DSA-65/87
+
+    def keygen_kem(self) -> Tuple[bytes, bytes]:
+        public_key = self.kem.generate_keypair()
+        secret_key = self.kem.export_secret_key()
+        return public_key, secret_key
+
+    def encapsulate(self, public_key: bytes) -> Tuple[bytes, bytes]:
+        ciphertext, shared_secret = self.kem.encap(public_key)
+        return ciphertext, shared_secret
+
+    def decapsulate(self, secret_key: bytes, ciphertext: bytes) -> bytes:
+        return self.kem.decap(ciphertext, secret_key)
+
+    def sign(self, message: bytes) -> bytes:
+        return self.sig.sign(message)
+
+    def verify(self, message: bytes, signature: bytes, public_key: bytes) -> bool:
+        return self.sig.verify(message, signature, public_key)
+
+    def hash_then_sign(self, data: bytes) -> bytes:
+        digest = hashlib.sha256(data).digest()
+        return self.sign(digest)
+
+# 4. Dynamic Reputation Mechanism (federated/reputation.py)
+Pythonimport numpy as np
+from typing import Dict
+
+class DynamicReputation:
+    def __init__(self, gamma: float = 0.7, theta: float = 0.35, epsilon_std: float = 0.05):
+        self.gamma = gamma
+        self.theta = theta
+        self.epsilon_std = epsilon_std
+        self.reputations: Dict[int, float] = {}
+
+    def update_reputation(self, client_id: int, quality_score: float):
+        if client_id not in self.reputations:
+            self.reputations[client_id] = 0.5
+        self.reputations[client_id] = (
+            self.gamma * self.reputations[client_id] +
+            (1 - self.gamma) * quality_score
+        )
+
+    def get_exclusion_threshold(self) -> float:
+        epsilon = np.random.normal(0, self.epsilon_std)
+        return np.clip(self.theta + epsilon, 0.0, 1.0)
+
+    def should_exclude(self, client_id: int) -> bool:
+        if client_id not in self.reputations:
+            return False
+        threshold = self.get_exclusion_threshold()
+        return self.reputations[client_id] < threshold
+
+    def cosine_similarity(self, grad1: np.ndarray, grad2: np.ndarray) -> float:
+        return np.dot(grad1, grad2) / (np.linalg.norm(grad1) * np.linalg.norm(grad2) + 1e-8)
+
+# 5. Federated Client (federated/client.py)
+Pythonimport tensorflow_federated as tff
+import numpy as np
+from crypto.pqc import PQCCrypto
+
+class QuorumFLClient:
+    def __init__(self, client_id: int):
+        self.client_id = client_id
+        self.crypto = PQCCrypto()
+        self.pkc, self.skc = self.crypto.keygen_kem()
+        self.reputation = 0.5
+
+    def train_local(self, model, dataset, epochs=5):
+        # Standard local training (TensorFlow/Keras)
+        model.fit(dataset, epochs=epochs)
+        return model.get_weights()
+
+    def sign_update(self, weights: list) -> bytes:
+        # Serialize weights
+        update_bytes = b''.join([w.tobytes() for w in weights])
+        return self.crypto.hash_then_sign(update_bytes)
+
+# 6. Main Federated Loop (main.py)
+Pythonimport tensorflow_federated as tff
+from federated.reputation import DynamicReputation
+from federated.client import QuorumFLClient
+
+def run_quorumfl_round(server_model, clients, dataset, reputation_system):
+    updates = []
+    signatures = []
+
+    for client in clients[:25]:  # e.g., 25 clients per round
+        if reputation_system.should_exclude(client.client_id):
+            continue
+
+        local_weights = client.train_local(server_model, dataset)
+        update_sig = client.sign_update(local_weights)
+
+        # Quality score (example)
+        quality = reputation_system.cosine_similarity(
+            np.concatenate([w.flatten() for w in local_weights]),
+            np.concatenate([w.flatten() for w in server_model.get_weights()])
+        )
+
+        reputation_system.update_reputation(client.client_id, quality)
+
+        updates.append(local_weights)
+        signatures.append(update_sig)
+
+    # Reputation-weighted aggregation
+    weights = [reputation_system.reputations.get(i, 0.5) for i in range(len(updates))]
+    weights = np.array(weights) / sum(weights)
+
+    # FedAvg with reputation weights
+    new_weights = [sum(w * u for w, u in zip(weights, layer_updates))
+                   for layer_updates in zip(*updates)]
+
+    server_model.set_weights(new_weights)
+    return server_model
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize
+    reputation = DynamicReputation(gamma=0.7)
+    clients = [QuorumFLClient(i) for i in range(50)]
+
+    # Run 500 rounds (simplified)
+    for round_num in range(500):
+        server_model = ...  # your model
+        run_quorumfl_round(server_model, clients, dataset, reputation)
+        print(f"Round {round_num} completed")
+# 7. Merkle Tree Batch Signing (crypto/merkle.py)
+Pythonimport hashlib
+
+class MerkleTree:
+    def __init__(self, leaves):
+        self.leaves = [hashlib.sha256(leaf).digest() for leaf in leaves]
+        self.root = self._build_tree(self.leaves)
+
+    def _build_tree(self, nodes):
+        if len(nodes) == 1:
+            return nodes[0]
+        new_level = []
+        for i in range(0, len(nodes), 2):
+            left = nodes[i]
+            right = nodes[i+1] if i+1 < len(nodes) else left
+            new_level.append(hashlib.sha256(left + right).digest())
+        return self._build_tree(new_level)
